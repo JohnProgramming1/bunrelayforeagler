@@ -4,7 +4,7 @@
 // Guest frames: raw payload, wrapped into the same frame shape before reaching the host.
 // Control messages to the host are JSON text: hosted / peer-open / peer-close.
 import { locKey, parseLoc, randomId, type BusMsg, type Loc } from "./bus.ts";
-import { ByteBudget, copyBytes, isOpen, safeClose, sendBytes, type Deps, type Session, type WS } from "./session.ts";
+import { ByteBudget, copyBytes, isOpen, safeClose, sendBytes, type Deps, type Session, type SessionInfo, type WS } from "./session.ts";
 
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const HOST_FRAME_VERSION = 1;
@@ -51,6 +51,9 @@ export class LanHostSession implements Session {
   private code = "";
   private peers = new Map<string, Peer>();
   private closed = false;
+  private joinedTotal = 0;
+  private up = 0;
+  private down = 0;
   private keepalive: ReturnType<typeof setInterval> | null = null;
   private lifetime: ReturnType<typeof setTimeout> | null = null;
 
@@ -78,8 +81,14 @@ export class LanHostSession implements Session {
     sendJson(this.ws, { type: "hosted", code: this.code, maxPeers: cfg.maxLanPeers });
   }
 
+  describe(): SessionInfo | null {
+    if (this.closed || !this.code) return null;
+    return { kind: "lan", mode: "relayed", code: this.code, guests: this.peers.size, joinedTotal: this.joinedTotal, up: this.up, down: this.down };
+  }
+
   message(_ws: WS, data: string | Buffer) {
     if (typeof data === "string") return this.shutdown(1003, "binary host frames required");
+    this.up += (data as Uint8Array).byteLength;
     try {
       const { peerId, payload } = parseHostFrame(data as Uint8Array);
       const peer = this.peers.get(peerId);
@@ -101,6 +110,7 @@ export class LanHostSession implements Session {
         let peerId: string;
         do peerId = randomId(8); while (this.peers.has(peerId));
         this.peers.set(peerId, { loc: from, budget: new ByteBudget(cfg.maxLanBytesPerMinute) });
+        this.joinedTotal++;
         sendJson(this.ws, { type: "peer-open", peer: peerId });
         bus.send(from, { t: "F.ok", peer: peerId });
         return;
@@ -109,7 +119,8 @@ export class LanHostSession implements Session {
         const peerId = msg.peer as string;
         if (!this.peers.has(peerId)) return;
         if (this.ws && this.ws.getBufferedAmount() > MAX_BUFFERED_BYTES) return this.dropPeer(peerId, 1008, "host is too slow");
-        sendBytes(this.ws, peerFrame(peerId, msg.data as Uint8Array));
+        const frame = peerFrame(peerId, msg.data as Uint8Array);
+        if (sendBytes(this.ws, frame)) this.down += frame.byteLength;
         return;
       }
       case "F.gone": {

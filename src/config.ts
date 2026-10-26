@@ -11,6 +11,8 @@ export type RelayConfig = {
   iceServers: string[];
   clientPath: string;
   trace: boolean;
+  /** Password for the /admin status page. Page is disabled when unset. */
+  adminPassword: string | undefined;
 };
 
 const num = (v: string | undefined, d: number) => (v !== undefined && v !== "" && Number.isFinite(Number(v)) ? Number(v) : d);
@@ -35,6 +37,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
       .split(",").map((s) => s.trim()).filter(Boolean).slice(0, 16),
     clientPath: env.RELAY_CLIENT_HTML ?? "public/play/index.html",
     trace: env.RELAY_TRACE === "1",
+    adminPassword: env.RELAY_ADMIN_PASSWORD || undefined,
     ...overrides,
   };
   if (!cfg.publicAccess && (!cfg.secret || cfg.secret.length < 16)) {

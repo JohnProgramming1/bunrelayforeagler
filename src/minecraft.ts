@@ -2,8 +2,8 @@
 // The first bytes from the browser must be a valid Minecraft handshake whose port matches
 // the target; after that the relay is a dumb, zero-parse byte pipe (any protocol version).
 import type { Socket } from "bun";
-import { ByteBudget, copyBytes, safeClose, sendBytes, type Deps, type Session, type WS } from "./session.ts";
-import { concatBytes, validateMinecraftHandshake, type Target } from "./protocol.ts";
+import { ByteBudget, copyBytes, safeClose, sendBytes, type Deps, type Session, type SessionInfo, type WS } from "./session.ts";
+import { concatBytes, parseLoginStartName, validateMinecraftHandshake, type Target } from "./protocol.ts";
 
 const MAX_HANDSHAKE_BYTES = 65536;
 const MAX_QUEUED_BYTES = 8 * 1024 * 1024;
@@ -22,6 +22,11 @@ export class MinecraftSession implements Session {
   private clientBytes = 0;
   private targetBytes = 0;
   private traceId = Math.random().toString(36).slice(2, 8);
+  // status page
+  private player: string | null = null;
+  private protocol: number | null = null;
+  private nextState = 0;
+  private sniff: Uint8Array | null = null; // bytes after the handshake, until Login Start is read
 
   constructor(private deps: Deps, private target: Target, private connectHost: string) {
     this.budget = new ByteBudget(deps.cfg.maxBytesPerMinute);
@@ -83,11 +88,31 @@ export class MinecraftSession implements Session {
       if (result.port !== this.target.port) return this.end(1008, "handshake target port mismatch");
       this.trace(`handshake protocol=${result.protocol} state=${result.nextState} host=${result.host}`);
       this.accepted = true;
+      this.protocol = result.protocol;
+      this.nextState = result.nextState;
       this.pending = [];
       this.pendingBytes = 0;
+      if (result.nextState !== 1) this.sniffName(buffered.subarray(result.packetEnd));
       return this.write(buffered);
     }
+    if (this.sniff) this.sniffName(bytes);
     this.write(bytes);
+  }
+
+  private sniffName(more: Uint8Array) {
+    const buf = this.sniff ? concatBytes([this.sniff, more]) : copyBytes(more);
+    const name = parseLoginStartName(buf);
+    if (name === undefined && buf.length < 2048) {
+      this.sniff = buf;
+      return;
+    }
+    this.sniff = null;
+    if (name) this.player = name;
+  }
+
+  describe(): SessionInfo | null {
+    if (this.ended || this.nextState === 1 || !this.accepted) return null; // hide server-list pings
+    return { kind: "player", name: this.player, server: this.target.canonical, protocol: this.protocol, up: this.clientBytes, down: this.targetBytes };
   }
 
   private write(bytes: Uint8Array) {

@@ -162,3 +162,30 @@ export function closeCode(value: unknown, fallback = 1011): number {
   return code === 1000 || code === 1001 || code === 1002 || code === 1003 ||
     (code >= 1007 && code <= 1014) || (code >= 3000 && code <= 4999) ? code : fallback;
 }
+
+/**
+ * Reads the username from a Java "Login Start" packet (always sent uncompressed and
+ * unencrypted, right after a login handshake). undefined = need more bytes, null = not parseable.
+ */
+export function parseLoginStartName(bytes: Uint8Array): string | null | undefined {
+  try {
+    const len = readVarInt(bytes, 0);
+    if (!len) return undefined;
+    if (len.value < 2 || len.value > 1024) return null;
+    if (bytes.length < len.next + len.value) return undefined;
+    const id = readVarInt(bytes, len.next);
+    if (!id || id.value !== 0) return null;
+    const strLen = readVarInt(bytes, id.next);
+    if (!strLen || strLen.value < 1 || strLen.value > 64 || strLen.next + strLen.value > len.next + len.value) return null;
+    const name = utf8.decode(bytes.subarray(strLen.next, strLen.next + strLen.value));
+    return /^[\w.\-]{1,32}$/.test(name) ? name : null;
+  } catch {
+    return null;
+  }
+}
+
+export function makeLoginStart(name: string): Uint8Array {
+  const n = enc.encode(name);
+  const body = concatBytes([encodeVarInt(0), encodeVarInt(n.length), n, new Uint8Array(16)]);
+  return concatBytes([encodeVarInt(body.length), body]);
+}

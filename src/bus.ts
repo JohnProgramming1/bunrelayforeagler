@@ -21,6 +21,10 @@ export interface Bus {
   release(key: string): Promise<void>;
   send(to: Loc, msg: BusMsg): void;
   onMessage(handler: Handler): void;
+  /** Publish this instance's status snapshot (expires if the instance dies). */
+  putStatus(json: string, ttlSeconds: number): Promise<void>;
+  /** Snapshots from every live instance, this one included. */
+  listStatus(): Promise<string[]>;
 }
 
 const PREFIX = "eagrelay:";
@@ -77,6 +81,13 @@ class LocalBus implements Bus {
   onMessage(handler: Handler) {
     this.handler = handler;
   }
+  protected status = "";
+  async putStatus(json: string, _ttl = 0) {
+    this.status = json;
+  }
+  async listStatus() {
+    return this.status ? [this.status] : [];
+  }
 }
 
 class RedisBus extends LocalBus {
@@ -118,6 +129,18 @@ class RedisBus extends LocalBus {
   override async release(key: string) {
     await this.ready;
     await this.pub.del(PREFIX + key);
+  }
+  override async putStatus(json: string, ttl: number) {
+    this.status = json;
+    await this.ready;
+    await this.pub.set(`${PREFIX}status:${this.inst}`, json, "EX", String(ttl));
+  }
+  override async listStatus() {
+    await this.ready;
+    const keys = (await this.pub.keys(`${PREFIX}status:*`)) as string[];
+    if (!keys.length) return this.status ? [this.status] : [];
+    const values = (await this.pub.mget(...keys)) as (string | null)[];
+    return values.filter((v): v is string => typeof v === "string");
   }
   override send(to: Loc, msg: BusMsg) {
     if (to.inst === this.inst) return super.send(to, msg); // same instance: skip the round trip

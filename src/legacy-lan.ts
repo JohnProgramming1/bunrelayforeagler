@@ -5,7 +5,7 @@
 // talk to it over the bus, so this works across Vercel instances when Redis is configured.
 import { locKey, parseLoc, type BusMsg, type Loc } from "./bus.ts";
 import { concatBytes } from "./protocol.ts";
-import { copyBytes, safeClose, sendBytes, type Deps, type Session, type WS } from "./session.ts";
+import { copyBytes, safeClose, sendBytes, type Deps, type Session, type SessionInfo, type WS } from "./session.ts";
 
 const LAN_CODE_RE = /^[A-Z0-9]{6}$/;
 const ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
@@ -72,6 +72,9 @@ export class LegacyLanSession implements Session {
   // host
   private code = "";
   private guests = new Map<string, Loc>();
+  private joinedTotal = 0;
+  private up = 0;
+  private down = 0;
   private keepalive: ReturnType<typeof setInterval> | null = null;
   // guest
   private id = "";
@@ -91,7 +94,12 @@ export class LegacyLanSession implements Session {
   }
 
   private send(bytes: Uint8Array) {
-    sendBytes(this.ws, bytes);
+    if (sendBytes(this.ws, bytes)) this.down += bytes.byteLength;
+  }
+
+  describe(): SessionInfo | null {
+    if (this.role !== "host" || !this.code) return null;
+    return { kind: "lan", mode: "p2p", code: this.code, guests: this.guests.size, joinedTotal: this.joinedTotal, up: this.up, down: this.down };
   }
 
   private reject(code: number, reason: string, closeWith = 1008) {
@@ -101,6 +109,7 @@ export class LegacyLanSession implements Session {
 
   message(_ws: WS, data: string | Buffer) {
     const bytes = typeof data === "string" ? null : copyBytes(data as Uint8Array);
+    if (bytes) this.up += bytes.byteLength;
     // Serialize: handshakes are async (room lookups), and order must be kept.
     this.chain = this.chain.then(() => this.handle(bytes)).catch((e) => {
       this.reject(2, e instanceof Error ? e.message : "Invalid relay packet");
@@ -222,6 +231,7 @@ export class LegacyLanSession implements Session {
         let id: string;
         do id = randomCode(16); while (this.guests.has(id));
         this.guests.set(id, from);
+        this.joinedTotal++;
         bus.send(from, { t: "L.accept", id });
         this.send(pkt([Uint8Array.of(0x02), ascii8(id)]));
         return;

@@ -8,7 +8,13 @@ export interface Session {
   message(ws: WS, data: string | Buffer): void;
   close(code: number, reason: string): void;
   onBus?(msg: BusMsg): void;
+  /** What the status page shows for this socket; null = don't list it. */
+  describe?(): SessionInfo | null;
 }
+
+export type SessionInfo =
+  | { kind: "player"; name: string | null; server: string; protocol: number | null; up: number; down: number }
+  | { kind: "lan"; mode: "p2p" | "relayed"; code: string; guests: number; joinedTotal: number; up: number; down: number };
 
 export type SocketData = { sid: string; session: Session };
 export type WS = ServerWebSocket<SocketData>;

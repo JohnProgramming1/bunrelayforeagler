@@ -16,6 +16,12 @@ The client defaults to this site as its relay, so players open `https://your-app
 
 ## Deploy
 
+> **`api/server.js` is a pre-built bundle** of everything in `src/` plus Hono. Vercel's Bun
+> runtime crashed resolving the multi-file TypeScript imports (`ResolveMessage {}` /
+> `FUNCTION_INVOCATION_FAILED`), so the function ships as one self-contained file with no
+> imports to resolve. If you edit anything in `src/`, run `bun run build` and commit the new
+> `api/server.js`.
+
 ```bash
 bun install
 bunx vercel login
@@ -31,6 +37,23 @@ Or push to GitHub and import the repo in Vercel. `vercel.json` already sets the 
 Vercel can put a LAN host and a guest on different function instances. When that happens, the guest gets "no LAN world found."
 
 To fix it, add **Redis** from the Vercel Marketplace (Storage → Redis). That sets `REDIS_URL`, which the relay picks up automatically. It uses Bun's built-in Redis client, so no extra package is needed. `/health` shows `"sharedRooms": true` when it's working.
+
+## Status page (`/admin`)
+
+This page shows who's using the relay, live:
+- Players on Java servers, with their username, the server, time online, and data used.
+- Open LAN worlds, with their join codes (each has a copy button).
+
+Each entry shows a rough location (city, region, country) from Vercel's geo headers. IP addresses are never shown or stored.
+
+To turn it on:
+1. Add `RELAY_ADMIN_PASSWORD` in your Vercel project's environment variables.
+2. Redeploy.
+3. Open `https://your-app.vercel.app/admin`. Your browser will ask you to sign in: type anything as the username, then the password.
+
+The page is password-protected because the join codes let anyone into those worlds.
+
+Without Redis, the page only sees whichever Vercel instance answered the request. With Redis, every instance reports in every few seconds, so you see everyone.
 
 ## Vercel limits (read this)
 
@@ -57,6 +80,7 @@ Costs: relaying game traffic is billed as Active CPU plus data transfer.
 ```bash
 bun install
 bun start            # http://localhost:8787  (client at /play)
+bun run dev          # same, from source with auto-reload
 ```
 
 ## Updating the client
@@ -95,6 +119,7 @@ Tokens from the old Node and Cloudflare relays stay valid; the format is the sam
 | `RELAY_ICE_SERVERS` | Google + Cloudflare STUN | `stun:host:port` or `turn:host:port;user;pass` |
 | `RELAY_ALLOW_PRIVATE` | `0` | Allow LAN/private targets. Never enable this on a public relay. |
 | `RELAY_TRACE` | `0` | Per-connection logs |
+| `RELAY_ADMIN_PASSWORD` | — | Turns on the `/admin` status page |
 
 ## Tests
 

@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHmac } from "node:crypto";
 import { createRelay, type Relay } from "../src/relay.ts";
 import { createToken, verifyToken, verifyScopedToken, createScopedToken } from "../src/auth.ts";
-import { isPrivateTarget, makeHandshake, parseTarget, validateMinecraftHandshake } from "../src/protocol.ts";
+import { isPrivateTarget, makeHandshake, makeLoginStart, parseLoginStartName, parseTarget, validateMinecraftHandshake } from "../src/protocol.ts";
 import { parseHostFrame, peerFrame } from "../src/lan-rooms.ts";
 import { createBus } from "../src/bus.ts";
 
@@ -99,6 +99,12 @@ describe("protocol", () => {
     expect(validateMinecraftHandshake(Uint8Array.from([6, 1, 1, 1, 1, 1, 1])).status).toBe("invalid");
     expect(validateMinecraftHandshake(makeHandshake("a.b", 25565, 776, 3)).status).toBe("valid"); // transfer intent
   });
+});
+
+test("login start username parsing", () => {
+  expect(parseLoginStartName(makeLoginStart("Steve_123"))).toBe("Steve_123");
+  expect(parseLoginStartName(makeLoginStart("Steve").subarray(0, 3))).toBeUndefined();
+  expect(parseLoginStartName(Uint8Array.from([3, 5, 1, 65]))).toBeNull();
 });
 
 describe("auth", () => {
@@ -231,6 +237,62 @@ describe("relay (single instance)", () => {
   test("framed LAN room: host/join/data/close", async () => {
     await framedFlow(r.url, r.url);
   });
+
+  test("status page: off without a password", async () => {
+    expect((await fetch(`${r.http}/admin`)).status).toBe(503);
+  });
+});
+
+describe("status page", () => {
+  const PW = "hunter2-but-longer";
+  let s: ReturnType<typeof startRelay>;
+  let mc: import("bun").TCPSocketListener<undefined>;
+  const auth = { authorization: "Basic " + btoa("admin:" + PW) };
+  beforeAll(() => {
+    s = startRelay({ RELAY_PUBLIC: "1", RELAY_ALLOW_PRIVATE: "1", RELAY_ADMIN_PASSWORD: PW });
+    mc = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
+  });
+  afterAll(() => { s.server.stop(true); mc.stop(true); });
+
+  test("requires the password", async () => {
+    const no = await fetch(`${s.http}/admin`);
+    expect(no.status).toBe(401);
+    expect(no.headers.get("www-authenticate")).toContain("Basic");
+    const wrong = await fetch(`${s.http}/admin/status`, { headers: { authorization: "Basic " + btoa("admin:nope") } });
+    expect(wrong.status).toBe(401);
+    const ok = await fetch(`${s.http}/admin`, { headers: auth });
+    expect(ok.status).toBe(200);
+    expect(await ok.text()).toContain("Open LAN worlds");
+    expect((await fetch(`${s.http}/api/server?__route=admin-status`, { headers: auth })).status).toBe(200);
+  });
+
+  test("lists players by name and LAN join codes", async () => {
+    const player = new Client(`${s.url}/minecraft?target=127.0.0.1:${mc.port}`);
+    await player.opened;
+    player.send(cat(makeHandshake("127.0.0.1", mc.port, 776, 2), makeLoginStart("Notch")));
+    const pinger = new Client(`${s.url}/minecraft?target=127.0.0.1:${mc.port}`);
+    await pinger.opened;
+    pinger.send(makeHandshake("127.0.0.1", mc.port, 776, 1)); // server-list ping: must not be listed
+
+    const host = new Client(`${s.url}/`);
+    await host.opened;
+    host.send(cat([0, 1, 1], a8("")));
+    const code = readA8(await host.nextBytes(), 3);
+    const roomHost = new Client(`${s.url}/lan/host`);
+    await roomHost.opened;
+    const hosted = await roomHost.nextJson();
+    await Bun.sleep(100);
+
+    const st = (await (await fetch(`${s.http}/admin/status`, { headers: { ...auth, "x-vercel-ip-country": "US", "x-vercel-ip-city": "San%20Jose" } })).json()) as any;
+    const players = st.sessions.filter((x: any) => x.kind === "player");
+    expect(players.length).toBe(1);
+    expect(players[0].name).toBe("Notch");
+    expect(players[0].server).toBe(`127.0.0.1:${mc.port}`);
+    expect(players[0]).not.toHaveProperty("ip");
+    const codes = st.sessions.filter((x: any) => x.kind === "lan").map((x: any) => x.code).sort();
+    expect(codes).toEqual([code, hosted.code].sort());
+    for (const c of [player, pinger, host, roomHost]) c.ws.close();
+  });
 });
 
 async function legacyFlow(hostUrl: string, guestUrl: string) {
@@ -338,4 +400,18 @@ describe.skipIf(!redisUp)("relay (two instances sharing Redis)", () => {
   test("framed LAN: host on A, guest on B", async () => {
     await framedFlow(a.url, b.url);
   });
+  test("status on B shows a LAN world hosted on A", async () => {
+    const pw = "same-password-on-both";
+    const a2 = startRelay({ RELAY_PUBLIC: "1", REDIS_URL: REDIS, RELAY_ADMIN_PASSWORD: pw });
+    const b2 = startRelay({ RELAY_PUBLIC: "1", REDIS_URL: REDIS, RELAY_ADMIN_PASSWORD: pw });
+    const host = new Client(`${a2.url}/lan/host`);
+    await host.opened;
+    const { code } = await host.nextJson();
+    await Bun.sleep(4500); // one heartbeat
+    const st = (await (await fetch(`${b2.http}/admin/status`, { headers: { authorization: "Basic " + btoa("x:" + pw) } })).json()) as any;
+    expect(st.sessions.map((x: any) => x.code)).toContain(code);
+    host.ws.close();
+    a2.server.stop(true);
+    b2.server.stop(true);
+  }, 10000);
 });
